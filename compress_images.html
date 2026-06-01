@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>画像圧縮ツール（ローカル専用）</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Meiryo", "Yu Gothic", sans-serif; background: #f0f2f5; color: #333; }
+  header { background: #1a73e8; color: #fff; padding: 16px 24px; }
+  header h1 { font-size: 18px; font-weight: bold; }
+  header p { font-size: 12px; margin-top: 4px; opacity: 0.85; }
+  .container { max-width: 900px; margin: 24px auto; padding: 0 16px; }
+  .drop-zone {
+    border: 3px dashed #1a73e8; border-radius: 12px; background: #fff;
+    padding: 48px 24px; text-align: center; cursor: pointer; transition: background 0.2s;
+  }
+  .drop-zone:hover, .drop-zone.dragover { background: #e8f0fe; }
+  .drop-zone input { display: none; }
+  .drop-zone .icon { font-size: 48px; }
+  .drop-zone p { margin-top: 12px; font-size: 15px; color: #555; }
+  .drop-zone small { color: #888; font-size: 12px; }
+  .settings {
+    background: #fff; border-radius: 12px; padding: 16px 20px; margin-top: 16px;
+    display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+  }
+  .settings label { font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .settings input[type=number] {
+    width: 80px; padding: 4px 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px;
+  }
+  .btn { padding: 10px 24px; border-radius: 8px; border: none; cursor: pointer; font-size: 14px; font-weight: bold; }
+  .btn-primary { background: #1a73e8; color: #fff; }
+  .btn-primary:disabled { background: #aaa; cursor: not-allowed; }
+  .btn-success { background: #34a853; color: #fff; }
+  .progress-wrap { margin-top: 16px; display: none; }
+  .progress-bar-bg { background: #e0e0e0; border-radius: 8px; height: 12px; overflow: hidden; }
+  .progress-bar { background: #1a73e8; height: 100%; width: 0%; transition: width 0.2s; border-radius: 8px; }
+  .progress-label { font-size: 13px; color: #555; margin-top: 6px; text-align: right; }
+  .results { margin-top: 20px; }
+  .result-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; }
+  .result-table th { background: #f5f5f5; font-size: 13px; padding: 10px 12px; text-align: left; }
+  .result-table td { padding: 8px 12px; font-size: 13px; border-top: 1px solid #eee; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+  .tag-ok { background: #e6f4ea; color: #2e7d32; }
+  .tag-skip { background: #fce8b2; color: #e65100; }
+  .tag-err { background: #fce8e6; color: #c62828; }
+  .summary {
+    background: #fff; border-radius: 12px; padding: 16px 20px; margin-top: 16px;
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+  }
+  .summary-stats { font-size: 14px; color: #444; }
+  .summary-stats span { font-weight: bold; color: #1a73e8; }
+  canvas { display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>画像圧縮ツール（ローカル専用・完全オフライン対応）</h1>
+  <p>画像はブラウザ内だけで処理されます。外部サーバーには一切送信されません。インターネット接続不要。</p>
+</header>
+
+<div class="container">
+  <div class="drop-zone" id="dropZone">
+    <input type="file" id="fileInput" accept="image/jpeg,image/jpg" multiple>
+    <div class="icon">🖼️</div>
+    <p>ここをクリック、またはJPGファイルをドラッグ＆ドロップ</p>
+    <small>複数ファイル同時選択可（198枚でも対応）</small>
+  </div>
+
+  <div class="settings">
+    <label>
+      上限サイズ:
+      <input type="number" id="maxSizeMB" value="2" min="0.1" max="10" step="0.1"> MB
+    </label>
+    <button class="btn btn-primary" id="startBtn" disabled>圧縮開始</button>
+  </div>
+
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-bar-bg"><div class="progress-bar" id="progressBar"></div></div>
+    <div class="progress-label" id="progressLabel">0 / 0</div>
+  </div>
+
+  <div class="results" id="results"></div>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+// ── ミニマルZIPビルダー（外部ライブラリ不要・CRC32+DEFLATE未使用のstored形式）──
+const ZipBuilder = (() => {
+  function u16(n) { return [n & 0xff, (n >> 8) & 0xff]; }
+  function u32(n) { return [n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff]; }
+
+  function crc32(buf) {
+    let c = 0xffffffff;
+    const t = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let k = i;
+      for (let j = 0; j < 8; j++) k = (k & 1) ? (0xedb88320 ^ (k >>> 1)) : (k >>> 1);
+      t[i] = k;
+    }
+    for (let i = 0; i < buf.length; i++) c = t[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+
+  function strBytes(s) { return new TextEncoder().encode(s); }
+
+  function concat(...arrays) {
+    const total = arrays.reduce((a, b) => a + b.length, 0);
+    const out = new Uint8Array(total);
+    let pos = 0;
+    for (const a of arrays) { out.set(a, pos); pos += a.length; }
+    return out;
+  }
+
+  return {
+    build(files) {
+      // files: [{name: string, data: Uint8Array}]
+      const localHeaders = [];
+      const centralDir = [];
+      let offset = 0;
+
+      for (const { name, data } of files) {
+        const nameBytes = strBytes(name);
+        const crc = crc32(data);
+        const size = data.length;
+
+        const local = new Uint8Array([
+          0x50, 0x4b, 0x03, 0x04, // local file header sig
+          0x14, 0x00,             // version needed
+          0x00, 0x00,             // general purpose bit flag
+          0x00, 0x00,             // compression method: stored
+          0x00, 0x00, 0x00, 0x00, // last mod time/date
+          ...u32(crc),
+          ...u32(size),
+          ...u32(size),
+          ...u16(nameBytes.length),
+          0x00, 0x00,             // extra field length
+          ...nameBytes,
+          ...data
+        ]);
+
+        const central = new Uint8Array([
+          0x50, 0x4b, 0x01, 0x02, // central dir sig
+          0x14, 0x00,             // version made by
+          0x14, 0x00,             // version needed
+          0x00, 0x00,
+          0x00, 0x00,             // compression: stored
+          0x00, 0x00, 0x00, 0x00,
+          ...u32(crc),
+          ...u32(size),
+          ...u32(size),
+          ...u16(nameBytes.length),
+          0x00, 0x00,             // extra
+          0x00, 0x00,             // comment
+          0x00, 0x00,             // disk start
+          0x00, 0x00,             // int attr
+          0x00, 0x00, 0x00, 0x00, // ext attr
+          ...u32(offset),
+          ...nameBytes
+        ]);
+
+        localHeaders.push(local);
+        centralDir.push(central);
+        offset += local.length;
+      }
+
+      const cdOffset = offset;
+      const cdSize = centralDir.reduce((a, b) => a + b.length, 0);
+      const count = files.length;
+
+      const eocd = new Uint8Array([
+        0x50, 0x4b, 0x05, 0x06,
+        0x00, 0x00,
+        0x00, 0x00,
+        ...u16(count),
+        ...u16(count),
+        ...u32(cdSize),
+        ...u32(cdOffset),
+        0x00, 0x00
+      ]);
+
+      return concat(...localHeaders, ...centralDir, eocd);
+    }
+  };
+})();
+
+// ── UI ──
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const startBtn  = document.getElementById('startBtn');
+const progressWrap = document.getElementById('progressWrap');
+const progressBar  = document.getElementById('progressBar');
+const progressLabel = document.getElementById('progressLabel');
+const resultsDiv   = document.getElementById('results');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let selectedFiles = [];
+let compressedFiles = [];
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('dragover'); handleFiles(e.dataTransfer.files); });
+fileInput.addEventListener('change', () => handleFiles(fileInput.files));
+
+function handleFiles(files) {
+  selectedFiles = Array.from(files).filter(f =>
+    f.type === 'image/jpeg' || /\.(jpg|jpeg)$/i.test(f.name)
+  );
+  if (selectedFiles.length > 0) {
+    startBtn.disabled = false;
+    dropZone.querySelector('p').textContent = `${selectedFiles.length} 枚のJPG画像が選択されました`;
+  }
+}
+
+startBtn.addEventListener('click', async () => {
+  if (!selectedFiles.length) return;
+  const maxBytes = parseFloat(document.getElementById('maxSizeMB').value) * 1024 * 1024;
+
+  startBtn.disabled = true;
+  compressedFiles = [];
+  resultsDiv.innerHTML = '';
+  progressWrap.style.display = 'block';
+
+  const rows = [];
+  let successCount = 0, skipCount = 0;
+
+  for (let i = 0; i < selectedFiles.length; i++) {
+    const file = selectedFiles[i];
+    progressBar.style.width = ((i + 1) / selectedFiles.length * 100) + '%';
+    progressLabel.textContent = `${i + 1} / ${selectedFiles.length}`;
+
+    try {
+      const result = await compressFile(file, maxBytes);
+      const arrayBuf = await result.blob.arrayBuffer();
+      compressedFiles.push({ name: file.name, data: new Uint8Array(arrayBuf) });
+
+      const beforeMB = (file.size / 1024 / 1024).toFixed(2);
+      const afterMB  = (result.blob.size / 1024 / 1024).toFixed(2);
+
+      if (result.skipped) {
+        skipCount++;
+        rows.push(`<tr><td>${esc(file.name)}</td><td>${beforeMB} MB</td><td>${afterMB} MB</td><td><span class="tag tag-skip">スキップ</span></td></tr>`);
+      } else {
+        successCount++;
+        rows.push(`<tr><td>${esc(file.name)}</td><td>${beforeMB} MB</td><td>${afterMB} MB</td><td><span class="tag tag-ok">圧縮済</span></td></tr>`);
+      }
+    } catch (e) {
+      rows.push(`<tr><td>${esc(file.name)}</td><td>-</td><td>-</td><td><span class="tag tag-err">エラー</span></td></tr>`);
+    }
+    await tick();
+  }
+
+  resultsDiv.innerHTML = `
+    <div class="summary">
+      <div class="summary-stats">
+        合計 <span>${selectedFiles.length}</span> 枚 ／ 圧縮 <span>${successCount}</span> 枚 ／ スキップ（上限以下）<span>${skipCount}</span> 枚
+      </div>
+      <button class="btn btn-success" id="downloadBtn">📥 すべてZIPでダウンロード</button>
+    </div>
+    <table class="result-table" style="margin-top:12px">
+      <thead><tr><th>ファイル名</th><th>変換前</th><th>変換後</th><th>結果</th></tr></thead>
+      <tbody>${rows.join('')}</tbody>
+    </table>
+  `;
+  document.getElementById('downloadBtn').addEventListener('click', downloadAll);
+  startBtn.disabled = false;
+});
+
+function compressFile(file, maxBytes) {
+  return new Promise((resolve, reject) => {
+    if (file.size <= maxBytes) { resolve({ blob: file, skipped: true }); return; }
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => { URL.revokeObjectURL(url); tryCompress(img, maxBytes, resolve, reject); };
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+function tryCompress(img, maxBytes, resolve, reject) {
+  const qualities = [0.85, 0.75, 0.65, 0.55, 0.45, 0.35, 0.25];
+  function attempt(qi, scale) {
+    canvas.width  = Math.round(img.naturalWidth  * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(blob => {
+      if (!blob) { reject(new Error('変換失敗')); return; }
+      if (blob.size <= maxBytes) {
+        resolve({ blob, skipped: false });
+      } else if (qi < qualities.length - 1) {
+        attempt(qi + 1, scale);
+      } else {
+        const newScale = scale * Math.sqrt(maxBytes / blob.size) * 0.92;
+        if (newScale < 0.1) { resolve({ blob, skipped: false }); return; }
+        attempt(0, newScale);
+      }
+    }, 'image/jpeg', qualities[qi]);
+  }
+  attempt(0, 1.0);
+}
+
+function downloadAll() {
+  if (!compressedFiles.length) return;
+  const zipBytes = ZipBuilder.build(compressedFiles);
+  const blob = new Blob([zipBytes], { type: 'application/zip' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'compressed_images.zip';
+  a.click();
+}
+
+const tick = () => new Promise(r => setTimeout(r, 0));
+const esc  = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+</script>
+</body>
+</html>
