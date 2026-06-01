@@ -87,101 +87,105 @@
 <canvas id="canvas"></canvas>
 
 <script>
-// ── ミニマルZIPビルダー（外部ライブラリ不要・CRC32+DEFLATE未使用のstored形式）──
+// ── ミニマルZIPビルダー（外部ライブラリ不要・stored形式・DataView使用）──
 const ZipBuilder = (() => {
-  function u16(n) { return [n & 0xff, (n >> 8) & 0xff]; }
-  function u32(n) { return [n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff]; }
+  const enc = new TextEncoder();
 
   function crc32(buf) {
-    let c = 0xffffffff;
     const t = new Uint32Array(256);
     for (let i = 0; i < 256; i++) {
       let k = i;
       for (let j = 0; j < 8; j++) k = (k & 1) ? (0xedb88320 ^ (k >>> 1)) : (k >>> 1);
       t[i] = k;
     }
+    let c = 0xffffffff;
     for (let i = 0; i < buf.length; i++) c = t[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
     return (c ^ 0xffffffff) >>> 0;
   }
 
-  function strBytes(s) { return new TextEncoder().encode(s); }
-
-  function concat(...arrays) {
-    const total = arrays.reduce((a, b) => a + b.length, 0);
+  function concat(chunks) {
+    const total = chunks.reduce((s, c) => s + c.length, 0);
     const out = new Uint8Array(total);
     let pos = 0;
-    for (const a of arrays) { out.set(a, pos); pos += a.length; }
+    for (const c of chunks) { out.set(c, pos); pos += c.length; }
     return out;
+  }
+
+  function localEntry(nameBytes, data, crc) {
+    // ヘッダー部分のみ（dataは別途concat）
+    const hdr = new Uint8Array(30 + nameBytes.length);
+    const v = new DataView(hdr.buffer);
+    v.setUint32(0,  0x04034b50, true); // local file header sig
+    v.setUint16(4,  0x0014,     true); // version needed
+    v.setUint16(6,  0x0000,     true); // flags
+    v.setUint16(8,  0x0000,     true); // compression: stored
+    v.setUint16(10, 0x0000,     true); // mod time
+    v.setUint16(12, 0x0000,     true); // mod date
+    v.setUint32(14, crc,        true); // crc-32
+    v.setUint32(18, data.length, true); // compressed size
+    v.setUint32(22, data.length, true); // uncompressed size
+    v.setUint16(26, nameBytes.length, true);
+    v.setUint16(28, 0,          true); // extra field length
+    hdr.set(nameBytes, 30);
+    return hdr;
+  }
+
+  function centralEntry(nameBytes, crc, size, offset) {
+    const ent = new Uint8Array(46 + nameBytes.length);
+    const v = new DataView(ent.buffer);
+    v.setUint32(0,  0x02014b50, true); // central dir sig
+    v.setUint16(4,  0x0014,     true); // version made by
+    v.setUint16(6,  0x0014,     true); // version needed
+    v.setUint16(8,  0x0000,     true); // flags
+    v.setUint16(10, 0x0000,     true); // compression: stored
+    v.setUint16(12, 0x0000,     true); // mod time
+    v.setUint16(14, 0x0000,     true); // mod date
+    v.setUint32(16, crc,        true);
+    v.setUint32(20, size,       true); // compressed
+    v.setUint32(24, size,       true); // uncompressed
+    v.setUint16(28, nameBytes.length, true);
+    v.setUint16(30, 0,          true); // extra
+    v.setUint16(32, 0,          true); // comment
+    v.setUint16(34, 0,          true); // disk start
+    v.setUint16(36, 0,          true); // int attr
+    v.setUint32(38, 0,          true); // ext attr
+    v.setUint32(42, offset,     true); // local header offset
+    ent.set(nameBytes, 46);
+    return ent;
   }
 
   return {
     build(files) {
       // files: [{name: string, data: Uint8Array}]
-      const localHeaders = [];
-      const centralDir = [];
+      const localChunks = [];
+      const cdChunks = [];
       let offset = 0;
 
       for (const { name, data } of files) {
-        const nameBytes = strBytes(name);
+        const nameBytes = enc.encode(name);
         const crc = crc32(data);
-        const size = data.length;
-
-        const local = new Uint8Array([
-          0x50, 0x4b, 0x03, 0x04, // local file header sig
-          0x14, 0x00,             // version needed
-          0x00, 0x00,             // general purpose bit flag
-          0x00, 0x00,             // compression method: stored
-          0x00, 0x00, 0x00, 0x00, // last mod time/date
-          ...u32(crc),
-          ...u32(size),
-          ...u32(size),
-          ...u16(nameBytes.length),
-          0x00, 0x00,             // extra field length
-          ...nameBytes,
-          ...data
-        ]);
-
-        const central = new Uint8Array([
-          0x50, 0x4b, 0x01, 0x02, // central dir sig
-          0x14, 0x00,             // version made by
-          0x14, 0x00,             // version needed
-          0x00, 0x00,
-          0x00, 0x00,             // compression: stored
-          0x00, 0x00, 0x00, 0x00,
-          ...u32(crc),
-          ...u32(size),
-          ...u32(size),
-          ...u16(nameBytes.length),
-          0x00, 0x00,             // extra
-          0x00, 0x00,             // comment
-          0x00, 0x00,             // disk start
-          0x00, 0x00,             // int attr
-          0x00, 0x00, 0x00, 0x00, // ext attr
-          ...u32(offset),
-          ...nameBytes
-        ]);
-
-        localHeaders.push(local);
-        centralDir.push(central);
-        offset += local.length;
+        const lhdr = localEntry(nameBytes, data, crc);
+        localChunks.push(lhdr, data);
+        cdChunks.push(centralEntry(nameBytes, crc, data.length, offset));
+        offset += lhdr.length + data.length;
       }
 
       const cdOffset = offset;
-      const cdSize = centralDir.reduce((a, b) => a + b.length, 0);
+      const cdBytes = concat(cdChunks);
       const count = files.length;
 
-      const eocd = new Uint8Array([
-        0x50, 0x4b, 0x05, 0x06,
-        0x00, 0x00,
-        0x00, 0x00,
-        ...u16(count),
-        ...u16(count),
-        ...u32(cdSize),
-        ...u32(cdOffset),
-        0x00, 0x00
-      ]);
+      const eocd = new Uint8Array(22);
+      const ev = new DataView(eocd.buffer);
+      ev.setUint32(0,  0x06054b50, true); // EOCD sig
+      ev.setUint16(4,  0,          true); // disk number
+      ev.setUint16(6,  0,          true); // disk with CD
+      ev.setUint16(8,  count,      true); // entries on disk
+      ev.setUint16(10, count,      true); // total entries
+      ev.setUint32(12, cdBytes.length, true); // CD size
+      ev.setUint32(16, cdOffset,   true); // CD offset
+      ev.setUint16(20, 0,          true); // comment length
 
-      return concat(...localHeaders, ...centralDir, eocd);
+      return concat([...localChunks, cdBytes, eocd]);
     }
   };
 })();
