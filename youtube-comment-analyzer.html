@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YouTubeコメント ジャンル分析</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #16181C; --panel: #1F232A; --line: #2A3038; --line2: #333A45;
+    --text: #E8EAED; --sub: #9AA3AE; --dim: #7A828D; --accent: #FF5D5D;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", sans-serif;
+    padding: 28px 20px 60px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; }
+  .dot { width: 14px; height: 14px; border-radius: 50%; background: var(--accent);
+         box-shadow: 0 0 12px rgba(255,93,93,.5); flex-shrink: 0; }
+  h1 { margin: 0; font-size: 20px; }
+  .sub { margin: 3px 0 0; font-size: 13px; color: var(--sub); }
+  .grid { display: grid; grid-template-columns: 1fr 1.2fr; gap: 18px; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  .label { font-size: 12px; font-weight: 700; color: var(--sub); letter-spacing: .08em; display: block; margin-bottom: 6px; }
+  input, select {
+    width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    color: var(--text); padding: 10px 12px; font-size: 13px; font-family: inherit; margin-bottom: 14px;
+  }
+  input:focus, select:focus, button:focus-visible { outline: 2px solid #5DA9FF; outline-offset: 1px; }
+  .hint { font-size: 11px; color: var(--dim); margin: -10px 0 14px; line-height: 1.6; }
+  .hint a { color: #5DA9FF; }
+  button.main {
+    width: 100%; background: var(--accent); color: var(--bg); border: none; border-radius: 10px;
+    padding: 13px 0; font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit;
+  }
+  button.main:disabled { opacity: .4; cursor: default; }
+  button.ghost {
+    background: transparent; border: 1px solid var(--line2); color: #B9C1CB;
+    border-radius: 8px; padding: 5px 10px; font-size: 12px; cursor: pointer; font-family: inherit;
+  }
+  .status { font-size: 13px; color: var(--sub); margin-top: 12px; line-height: 1.7; }
+  .status.err { color: #FF8A8A; }
+  .empty { min-height: 220px; display: flex; align-items: center; justify-content: center;
+           color: var(--dim); font-size: 13px; text-align: center; line-height: 1.8; }
+  .chartbox { position: relative; height: 300px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 14px; }
+  .chip { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line);
+          border-radius: 999px; padding: 5px 12px; font-size: 12px; color: var(--text);
+          cursor: pointer; background: transparent; font-family: inherit; }
+  .chip.on { background: #2A3038; }
+  .sw { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+  .chip b { font-weight: 600; }
+  .chip span { color: var(--sub); }
+  .list { max-height: 340px; overflow-y: auto; border-top: 1px solid var(--line); padding-top: 10px; }
+  .listhead { font-size: 12px; color: var(--sub); margin: 0 0 8px; display: flex; justify-content: space-between; align-items: center; }
+  .row { display: flex; gap: 8px; align-items: flex-start; padding: 7px 4px;
+         border-bottom: 1px solid #22262D; font-size: 13px; line-height: 1.6; }
+  .row .txt { flex: 1; }
+  .row .meta { font-size: 11px; color: var(--sub); white-space: nowrap; padding-top: 2px; }
+  .spinner { width: 18px; height: 18px; border-radius: 50%; border: 3px solid var(--line2);
+             border-top-color: var(--accent); animation: spin .8s linear infinite;
+             display: inline-block; vertical-align: -4px; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="dot"></div>
+    <div>
+      <h1>YouTubeコメント ジャンル分析</h1>
+      <p class="sub">動画URLを貼るだけで、コメントを自動取得してジャンル別の円グラフにします</p>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- 入力 -->
+    <section class="panel">
+      <label class="label">動画URL</label>
+      <input id="videoUrl" placeholder="https://www.youtube.com/watch?v=..." />
+
+      <label class="label">YouTube Data API キー(必須)</label>
+      <input id="ytKey" type="password" placeholder="AIza..." />
+      <p class="hint">
+        Google Cloud Console → 「YouTube Data API v3」を有効化 → 認証情報でAPIキーを作成(無料枠で十分です)。
+        キーはこのブラウザ内でのみ使用され、外部には送信されません。
+      </p>
+
+      <label class="label">取得件数</label>
+      <select id="maxComments">
+        <option value="100">100件(人気順)</option>
+        <option value="200" selected>200件(人気順)</option>
+        <option value="300">300件(人気順)</option>
+      </select>
+
+      <label class="label">分類方法</label>
+      <select id="mode" onchange="document.getElementById('claudeKeyBox').style.display = this.value==='ai' ? 'block' : 'none'">
+        <option value="keyword" selected>キーワード分類(APIキー不要・簡易)</option>
+        <option value="ai">AI分類(Anthropic APIキーが必要・高精度)</option>
+      </select>
+
+      <div id="claudeKeyBox" style="display:none">
+        <label class="label">Anthropic API キー</label>
+        <input id="claudeKey" type="password" placeholder="sk-ant-..." />
+        <p class="hint">console.anthropic.com で取得できます。コメント内容の解釈まで含めて分類するため精度が高くなります。</p>
+      </div>
+
+      <button class="main" id="runBtn" onclick="run()">コメントを取得してジャンル分け</button>
+      <p class="status" id="status"></p>
+    </section>
+
+    <!-- 結果 -->
+    <section class="panel">
+      <div id="emptyBox" class="empty">
+        <p>ここに円グラフが表示されます。<br>左に動画URLとAPIキーを入力して実行してください。</p>
+      </div>
+      <div id="resultBox" style="display:none">
+        <div class="chartbox"><canvas id="pie"></canvas></div>
+        <div class="legend" id="legend"></div>
+        <div class="list">
+          <p class="listhead">
+            <span id="listTitle"></span>
+            <button class="ghost" onclick="downloadCsv()">CSVダウンロード</button>
+          </p>
+          <div id="commentList"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+const PALETTE = ["#FF5D5D","#FFB84D","#FFE14D","#7ED957","#4DD2C0","#5DA9FF","#9B7DFF","#FF7DC8","#C9A97E","#8FA3B0"];
+let results = [];      // [{comment, author, likes, genre}]
+let genreOrder = [];   // 件数降順のジャンル名
+let selected = null;
+let chart = null;
+
+function setStatus(msg, isErr=false, spin=false) {
+  const el = document.getElementById("status");
+  el.className = "status" + (isErr ? " err" : "");
+  el.innerHTML = (spin ? '<span class="spinner"></span>' : "") + msg;
+}
+
+function extractVideoId(url) {
+  const m = url.match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([\w-]{11})/);
+  return m ? m[1] : null;
+}
+
+// ---- YouTube Data APIでコメント取得 ----
+async function fetchComments(videoId, ytKey, max) {
+  const out = [];
+  let pageToken = "";
+  while (out.length < max) {
+    const url = "https://www.googleapis.com/youtube/v3/commentThreads"
+      + "?part=snippet&videoId=" + encodeURIComponent(videoId)
+      + "&maxResults=100&order=relevance&textFormat=plainText"
+      + "&key=" + encodeURIComponent(ytKey)
+      + (pageToken ? "&pageToken=" + pageToken : "");
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.error) {
+      const reason = data.error.errors?.[0]?.reason || "";
+      if (reason === "commentsDisabled") throw new Error("この動画はコメントが無効化されています。");
+      if (reason === "quotaExceeded") throw new Error("YouTube APIの1日あたりの無料枠を使い切りました。明日再試行してください。");
+      throw new Error("YouTube APIエラー: " + (data.error.message || reason));
+    }
+    for (const item of (data.items || [])) {
+      const s = item.snippet.topLevelComment.snippet;
+      out.push({
+        comment: (s.textOriginal || "").replace(/\s+/g, " ").trim(),
+        author: s.authorDisplayName || "",
+        likes: s.likeCount || 0,
+      });
+      if (out.length >= max) break;
+    }
+    if (!data.nextPageToken) break;
+    pageToken = data.nextPageToken;
+  }
+  return out.filter(c => c.comment);
+}
+
+// ---- 簡易キーワード分類 ----
+const RULES = [
+  ["タイムスタンプ言及", /\d{1,2}:\d{2}/],
+  ["質問", /[?？]|ですか|ますか|教えて|なんで|どうやって|どこで|何の曲|曲名/],
+  ["要望・リクエスト", /してほしい|して欲しい|お願い|リクエスト|次は|待って(る|ます)|コラボ|また.*(見たい|聴きたい|やって)/],
+  ["批判・指摘", /微妙|残念|イマイチ|いまいち|うるさい|長い|音量|音質|聞こえ(ない|づらい)|見(にくい|づらい)|違う(と思う|んじゃ)|間違|誤り/],
+  ["ネタ・ジョーク", /[wｗ草]{2,}|笑った|わろた|ワロタ|それな|for you|おもろ/],
+  ["称賛・感想", /好き|最高|神|すごい|凄い|感動|泣(いた|ける)|鳥肌|綺麗|きれい|かわいい|可愛い|かっこいい|上手|うまい|素敵|素晴らし|ありがと|助かる|参考にな|癒され|毎日|リピート|登録しました/],
+];
+function classifyByKeyword(comments) {
+  return comments.map(c => {
+    let genre = "その他";
+    for (const [name, re] of RULES) { if (re.test(c.comment)) { genre = name; break; } }
+    return { ...c, genre };
+  });
+}
+
+// ---- Anthropic APIでAI分類(50件ずつバッチ) ----
+async function classifyByAI(comments, claudeKey) {
+  const CHUNK = 50;
+  let labels = null;
+  const out = [];
+  for (let i = 0; i < comments.length; i += CHUNK) {
+    const batch = comments.slice(i, i + CHUNK);
+    setStatus(`AIで分類中… ${Math.min(i + CHUNK, comments.length)} / ${comments.length} 件`, false, true);
+    const numbered = batch.map((c, j) => `${j}: ${c.comment.slice(0, 200)}`).join("\n");
+    const genreInstr = labels
+      ? `分類には必ず次のジャンルのみを使用してください: ${labels.join(", ")}`
+      : `ジャンルはコメント全体を見て4〜8個、内容に即した簡潔な日本語名(例: 称賛・感想 / 質問 / 要望 / 批判・指摘 / ネタ・ジョーク / タイムスタンプ言及 / その他)を決めてください。`;
+    const prompt = `以下はYouTube動画のコメントです。各コメントを1つのジャンルに分類してください。
+${genreInstr}
+
+コメント一覧:
+${numbered}
+
+回答は次のJSON形式のみ。前置き・コードブロック禁止。
+{"labels": ["ジャンルA", ...], "assignments": [各コメントのlabelsインデックス, ...]}
+assignmentsは${batch.length}要素です。`;
+
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": claudeKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1500,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error("Anthropic APIエラー: " + (data.error.message || data.error.type));
+    const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
+    const clean = text.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1));
+    if (!labels) labels = parsed.labels;
+    batch.forEach((c, j) => out.push({ ...c, genre: (parsed.labels[parsed.assignments[j]] ?? "その他") }));
+  }
+  return out;
+}
+
+// ---- 実行 ----
+async function run() {
+  const url = document.getElementById("videoUrl").value.trim();
+  const ytKey = document.getElementById("ytKey").value.trim();
+  const mode = document.getElementById("mode").value;
+  const claudeKey = document.getElementById("claudeKey").value.trim();
+  const max = parseInt(document.getElementById("maxComments").value, 10);
+
+  const videoId = extractVideoId(url);
+  if (!videoId) return setStatus("動画URLからIDを読み取れませんでした。watch?v=… / youtu.be/… / shorts/… 形式に対応しています。", true);
+  if (!ytKey) return setStatus("YouTube Data APIキーを入力してください。", true);
+  if (mode === "ai" && !claudeKey) return setStatus("AI分類にはAnthropic APIキーが必要です。", true);
+
+  const btn = document.getElementById("runBtn");
+  btn.disabled = true;
+  try {
+    setStatus("コメントを取得中…", false, true);
+    const comments = await fetchComments(videoId, ytKey, max);
+    if (comments.length === 0) throw new Error("コメントが取得できませんでした。");
+    setStatus(`${comments.length}件取得。分類中…`, false, true);
+    results = mode === "ai" ? await classifyByAI(comments, claudeKey) : classifyByKeyword(comments);
+    selected = null;
+    render();
+    setStatus(`完了: ${results.length}件を ${genreOrder.length} ジャンルに分類しました。`);
+  } catch (e) {
+    console.error(e);
+    setStatus(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---- 描画 ----
+function colorOf(name) { return PALETTE[genreOrder.indexOf(name) % PALETTE.length]; }
+
+function render() {
+  const counts = new Map();
+  for (const r of results) counts.set(r.genre, (counts.get(r.genre) || 0) + 1);
+  genreOrder = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(e => e[0]);
+  const values = genreOrder.map(g => counts.get(g));
+  const total = results.length;
+
+  document.getElementById("emptyBox").style.display = "none";
+  document.getElementById("resultBox").style.display = "block";
+
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById("pie"), {
+    type: "doughnut",
+    data: {
+      labels: genreOrder,
+      datasets: [{
+        data: values,
+        backgroundColor: genreOrder.map(colorOf),
+        borderColor: "#16181C",
+        borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, cutout: "55%",
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: "#1F232A", borderColor: "#333A45", borderWidth: 1,
+          callbacks: { label: ctx => ` ${ctx.parsed}件 (${(ctx.parsed / total * 100).toFixed(1)}%)` },
+        },
+      },
+      onClick: (evt, els) => {
+        if (!els.length) return;
+        const name = genreOrder[els[0].index];
+        selected = (selected === name) ? null : name;
+        renderLegendAndList(counts, total);
+      },
+    },
+  });
+  renderLegendAndList(counts, total);
+}
+
+function renderLegendAndList(counts, total) {
+  // 凡例
+  const legend = document.getElementById("legend");
+  legend.innerHTML = "";
+  for (const g of genreOrder) {
+    const btn = document.createElement("button");
+    btn.className = "chip" + (selected === g ? " on" : "");
+    btn.innerHTML = `<span class="sw" style="background:${colorOf(g)}"></span><b>${esc(g)}</b><span>${counts.get(g)}件 · ${(counts.get(g) / total * 100).toFixed(0)}%</span>`;
+    btn.onclick = () => { selected = (selected === g) ? null : g; renderLegendAndList(counts, total); };
+    legend.appendChild(btn);
+  }
+  // 一覧
+  const visible = selected ? results.filter(r => r.genre === selected) : results;
+  document.getElementById("listTitle").textContent =
+    (selected ? `「${selected}」のコメント` : "すべてのコメント") + `(${visible.length}件)`;
+  const list = document.getElementById("commentList");
+  list.innerHTML = "";
+  for (const r of visible) {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `<span class="sw" style="background:${colorOf(r.genre)};margin-top:5px"></span>
+      <span class="txt">${esc(r.comment)}</span>
+      <span class="meta">${esc(r.genre)}${r.likes ? " · 👍" + r.likes : ""}</span>`;
+    list.appendChild(row);
+  }
+}
+
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+function downloadCsv() {
+  const rows = [["genre", "comment", "author", "likes"],
+    ...results.map(r => [r.genre, r.comment, r.author, r.likes])];
+  const csv = "\uFEFF" + rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = "youtube_comments_genres.csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+</script>
+</body>
+</html>
